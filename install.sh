@@ -222,6 +222,20 @@ systemctl enable php8.3-fpm
 systemctl start php8.3-fpm
 info "PHP 8.3-FPM running."
 
+# ─── Permissions for config directories ──────────────────────────────────────
+step "Setting directory permissions"
+# The agent user needs write access to drop vhost/pool configs.
+# Root retains ownership; group write bit lets fortihost write files.
+chown root:"$AGENT_USER" /etc/nginx/sites-enabled/
+chmod g+w /etc/nginx/sites-enabled/
+
+chown root:"$AGENT_USER" /etc/nginx/sites-available/
+chmod g+w /etc/nginx/sites-available/
+
+chown root:"$AGENT_USER" /etc/php/8.3/fpm/pool.d/
+chmod g+w /etc/php/8.3/fpm/pool.d/
+info "Directory permissions set."
+
 # ─── sudoers ────────────────────────────────────────────────────────────────
 step "Configuring sudoers"
 cat > /etc/sudoers.d/fortihost-agent <<'EOF'
