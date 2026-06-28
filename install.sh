@@ -91,8 +91,9 @@ fi
 # ─── Directories ─────────────────────────────────────────────────────────────
 step "Creating directories"
 mkdir -p "$AGENT_DIR" "$CONFIG_DIR" "$DATA_DIR" "$SITES_DIR"
-chown "$AGENT_USER:$AGENT_USER" "$DATA_DIR" "$SITES_DIR"
-chmod 750 "$DATA_DIR"
+# Config dir must be owned by the agent user so it can write the SSH host key at first start.
+chown "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR" "$DATA_DIR" "$SITES_DIR"
+chmod 750 "$CONFIG_DIR" "$DATA_DIR"
 info "Directories ready."
 
 # ─── Build ────────────────────────────────────────────────────────────────────
