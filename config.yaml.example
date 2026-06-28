@@ -1,0 +1,33 @@
+# FortiHost Agent — example configuration
+# Copy to /etc/fortihost-agent/config.yaml and edit.
+
+# Secret token — the panel must send this in every request.
+# Generate with: openssl rand -hex 32
+token: "CHANGE_ME_USE_OPENSSL_RAND_HEX_32"
+
+# HTTP API address. Bind to localhost and use a firewall to allow only
+# the panel server to reach this port.
+listen: ":8080"
+
+# Built-in SFTP server (does NOT use system users).
+sftp_listen: ":2022"
+sftp_host_key: "/etc/fortihost-agent/ssh_host_rsa_key"
+
+# Where the agent stores its state (sites.json).
+data_dir: "/var/lib/fortihost-agent"
+
+# Where website files live: /var/www/sites/{id}/public/
+sites_dir: "/var/www/sites"
+
+# nginx — drop-in config directory and reload command.
+nginx_sites_dir: "/etc/nginx/sites-enabled"
+nginx_reload: "systemctl reload nginx"
+
+# PHP-FPM — pool config directory and reload command.
+# Adjust the version number to match the installed PHP.
+phpfpm_pool_dir: "/etc/php/8.3/fpm/pool.d"
+phpfpm_reload: "systemctl reload php8.3-fpm"
+php_version: "8.3"
+
+# Let's Encrypt email (required for SSL certificate issuance).
+certbot_email: "admin@example.com"
