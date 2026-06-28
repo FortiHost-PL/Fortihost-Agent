@@ -259,7 +259,6 @@ Group=$AGENT_USER
 ExecStart=$AGENT_DIR/fortihost-agent -config $CONFIG_DIR/config.yaml
 Restart=always
 RestartSec=5
-NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
