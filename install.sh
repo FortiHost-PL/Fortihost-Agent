@@ -4,7 +4,6 @@
 
 set -euo pipefail
 
-AGENT_VERSION="1.0.0"
 AGENT_USER="fortihost"
 AGENT_DIR="/opt/fortihost-agent"
 CONFIG_DIR="/etc/fortihost-agent"
@@ -12,13 +11,38 @@ DATA_DIR="/var/lib/fortihost-agent"
 SITES_DIR="/var/www/sites"
 GO_VERSION="1.22.5"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 error() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
+step()  { echo -e "\n${CYAN}━━━ $* ${NC}"; }
 
 [[ $EUID -ne 0 ]] && error "Run as root (sudo bash install.sh)"
+
+# ─── Welcome ──────────────────────────────────────────────────────────────────
+echo -e "${CYAN}"
+echo "  ███████╗ ██████╗ ██████╗ ████████╗██╗██╗  ██╗ ██████╗ ███████╗████████╗"
+echo "  ██╔════╝██╔═══██╗██╔══██╗╚══██╔══╝██║██║  ██║██╔═══██╗██╔════╝╚══██╔══╝"
+echo "  █████╗  ██║   ██║██████╔╝   ██║   ██║███████║██║   ██║███████╗   ██║   "
+echo "  ██╔══╝  ██║   ██║██╔══██╗   ██║   ██║██╔══██║██║   ██║╚════██║   ██║   "
+echo "  ██║     ╚██████╔╝██║  ██║   ██║   ██║██║  ██║╚██████╔╝███████║   ██║   "
+echo "  ╚═╝      ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   "
+echo "                                        Agent Installer"
+echo -e "${NC}"
+
+# ─── Interactive prompts ──────────────────────────────────────────────────────
+step "Configuration"
+
+read -rp "Node domain (e.g. node1.fortihost.pl) — leave empty to skip SSL setup: " NODE_DOMAIN
+NODE_DOMAIN="${NODE_DOMAIN:-}"
+
+if [[ -n "$NODE_DOMAIN" ]]; then
+    read -rp "Email for Let's Encrypt (required for SSL): " CERTBOT_EMAIL
+    [[ -z "$CERTBOT_EMAIL" ]] && error "Email is required when a domain is provided."
+else
+    CERTBOT_EMAIL=""
+fi
 
 # ─── Detect OS ────────────────────────────────────────────────────────────────
 . /etc/os-release
@@ -26,21 +50,20 @@ if [[ "$ID" != "ubuntu" && "$ID" != "debian" ]]; then
     warn "This installer targets Debian/Ubuntu. Proceed with caution."
 fi
 
-info "Updating package list..."
+step "Installing system packages"
 apt-get update -qq
-
-# ─── System dependencies ──────────────────────────────────────────────────────
-info "Installing system dependencies..."
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     curl wget git unzip \
     nginx \
     php8.3-fpm php8.3-cli php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-gd php8.3-intl php8.3-bcmath \
-    certbot \
+    certbot python3-certbot-nginx \
     ufw
+info "Packages installed."
 
 # ─── Go ───────────────────────────────────────────────────────────────────────
-if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}')" != "go${GO_VERSION}" ]]; then
-    info "Installing Go ${GO_VERSION}..."
+step "Installing Go ${GO_VERSION}"
+if ! command -v /usr/local/go/bin/go &>/dev/null || \
+   [[ "$(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}')" != "go${GO_VERSION}" ]]; then
     ARCH=$(dpkg --print-architecture)
     case $ARCH in
         amd64) GOARCH="amd64" ;;
@@ -51,76 +74,164 @@ if ! command -v go &>/dev/null || [[ "$(go version | awk '{print $3}')" != "go${
     rm -rf /usr/local/go
     tar -C /usr/local -xzf /tmp/go.tar.gz
     rm /tmp/go.tar.gz
-    export PATH="/usr/local/go/bin:$PATH"
-    echo 'export PATH="/usr/local/go/bin:$PATH"' >> /etc/profile.d/go.sh
+    echo 'export PATH="/usr/local/go/bin:$PATH"' > /etc/profile.d/go.sh
 fi
+export PATH="/usr/local/go/bin:$PATH"
 info "Go version: $(go version)"
 
 # ─── Service user ────────────────────────────────────────────────────────────
+step "Creating system user"
 if ! id "$AGENT_USER" &>/dev/null; then
-    info "Creating system user: $AGENT_USER"
     useradd --system --shell /usr/sbin/nologin --home "$AGENT_DIR" "$AGENT_USER"
+    info "User '$AGENT_USER' created."
+else
+    info "User '$AGENT_USER' already exists."
 fi
 
 # ─── Directories ─────────────────────────────────────────────────────────────
-info "Creating directories..."
+step "Creating directories"
 mkdir -p "$AGENT_DIR" "$CONFIG_DIR" "$DATA_DIR" "$SITES_DIR"
 chown "$AGENT_USER:$AGENT_USER" "$DATA_DIR" "$SITES_DIR"
 chmod 750 "$DATA_DIR"
+info "Directories ready."
 
-# ─── Build the daemon ─────────────────────────────────────────────────────────
+# ─── Build ────────────────────────────────────────────────────────────────────
+step "Building fortihost-agent"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-info "Building fortihost-agent..."
 cd "$SCRIPT_DIR"
-/usr/local/go/bin/go mod download
-/usr/local/go/bin/go build -ldflags="-s -w" -o "$AGENT_DIR/fortihost-agent" .
+info "Downloading Go module dependencies..."
+go mod tidy
+info "Compiling..."
+go build -ldflags="-s -w" -o "$AGENT_DIR/fortihost-agent" .
 chown "$AGENT_USER:$AGENT_USER" "$AGENT_DIR/fortihost-agent"
 chmod 750 "$AGENT_DIR/fortihost-agent"
+info "Binary built: $AGENT_DIR/fortihost-agent"
 
 # ─── Config file ─────────────────────────────────────────────────────────────
+step "Generating configuration"
+TOKEN=$(openssl rand -hex 32)
+
+# API listens on localhost only — nginx proxies it with SSL if a domain is set.
+API_LISTEN="127.0.0.1:8080"
+
 if [[ ! -f "$CONFIG_DIR/config.yaml" ]]; then
-    info "Creating default config at $CONFIG_DIR/config.yaml"
-    TOKEN=$(openssl rand -hex 32)
-    sed "s/CHANGE_ME_USE_OPENSSL_RAND_HEX_32/$TOKEN/" "$SCRIPT_DIR/config.yaml.example" \
-        > "$CONFIG_DIR/config.yaml"
+    cat > "$CONFIG_DIR/config.yaml" <<YAML
+token: "${TOKEN}"
+listen: "${API_LISTEN}"
+sftp_listen: ":2022"
+sftp_host_key: "/etc/fortihost-agent/ssh_host_rsa_key"
+data_dir: "/var/lib/fortihost-agent"
+sites_dir: "/var/www/sites"
+nginx_sites_dir: "/etc/nginx/sites-enabled"
+nginx_reload: "sudo systemctl reload nginx"
+phpfpm_pool_dir: "/etc/php/8.3/fpm/pool.d"
+phpfpm_reload: "sudo systemctl reload php8.3-fpm"
+php_version: "8.3"
+certbot_email: "${CERTBOT_EMAIL}"
+YAML
     chmod 600 "$CONFIG_DIR/config.yaml"
     chown "$AGENT_USER:$AGENT_USER" "$CONFIG_DIR/config.yaml"
-    info ""
-    info "  ┌─────────────────────────────────────────────────────────┐"
-    info "  │  YOUR API TOKEN (save this — it won't be shown again)   │"
-    info "  │                                                         │"
-    info "  │  $TOKEN  │"
-    info "  └─────────────────────────────────────────────────────────┘"
-    info ""
-    info "Edit $CONFIG_DIR/config.yaml to set certbot_email and other options."
+    info "Config written to $CONFIG_DIR/config.yaml"
 else
-    info "Config file already exists — skipping token generation."
+    TOKEN=$(grep '^token:' "$CONFIG_DIR/config.yaml" | awk '{print $2}' | tr -d '"')
+    info "Config already exists — keeping existing token."
 fi
 
-# ─── nginx ────────────────────────────────────────────────────────────────────
-info "Configuring nginx..."
-# Remove the default site so port 80 doesn't conflict.
+# ─── nginx base setup ────────────────────────────────────────────────────────
+step "Configuring nginx"
 rm -f /etc/nginx/sites-enabled/default
 systemctl enable nginx
-systemctl reload nginx 2>/dev/null || systemctl start nginx
+nginx -t && systemctl reload nginx 2>/dev/null || systemctl start nginx
+info "nginx ready."
+
+# ─── nginx reverse proxy for node API ────────────────────────────────────────
+if [[ -n "$NODE_DOMAIN" ]]; then
+    step "Setting up nginx reverse proxy for ${NODE_DOMAIN}"
+
+    # HTTP-only config first (needed for certbot webroot challenge)
+    cat > "/etc/nginx/sites-available/fortihost-api" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${NODE_DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINX
+    ln -sf /etc/nginx/sites-available/fortihost-api /etc/nginx/sites-enabled/fortihost-api
+    nginx -t && systemctl reload nginx
+
+    info "Issuing Let's Encrypt certificate for ${NODE_DOMAIN}..."
+    mkdir -p /var/www/html
+    certbot certonly \
+        --webroot --webroot-path /var/www/html \
+        --domain "$NODE_DOMAIN" \
+        --email "$CERTBOT_EMAIL" \
+        --agree-tos --non-interactive --keep-until-expiring
+
+    # HTTPS config with reverse proxy
+    cat > "/etc/nginx/sites-available/fortihost-api" <<NGINX
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${NODE_DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${NODE_DOMAIN};
+
+    ssl_certificate /etc/letsencrypt/live/${NODE_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${NODE_DOMAIN}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+
+    # Security headers
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        client_max_body_size 128m;
+    }
+}
+NGINX
+    nginx -t && systemctl reload nginx
+    info "SSL reverse proxy configured — API available at https://${NODE_DOMAIN}"
+fi
 
 # ─── PHP-FPM ─────────────────────────────────────────────────────────────────
-info "Configuring PHP-FPM..."
+step "Configuring PHP-FPM"
 systemctl enable php8.3-fpm
 systemctl start php8.3-fpm
+info "PHP 8.3-FPM running."
 
-# ─── Let the agent reload nginx/php-fpm without a password ───────────────────
-info "Configuring sudoers for the agent..."
+# ─── sudoers ────────────────────────────────────────────────────────────────
+step "Configuring sudoers"
 cat > /etc/sudoers.d/fortihost-agent <<'EOF'
-# Allow fortihost-agent to reload nginx and PHP-FPM without a password.
 fortihost ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload nginx
 fortihost ALL=(ALL) NOPASSWD: /usr/bin/systemctl reload php8.3-fpm
 EOF
 chmod 440 /etc/sudoers.d/fortihost-agent
+info "sudoers configured."
 
-# ─── systemd unit ────────────────────────────────────────────────────────────
-info "Installing systemd service..."
+# ─── systemd service ─────────────────────────────────────────────────────────
+step "Installing systemd service"
 cat > /etc/systemd/system/fortihost-agent.service <<EOF
 [Unit]
 Description=FortiHost Agent
@@ -133,7 +244,6 @@ Group=$AGENT_USER
 ExecStart=$AGENT_DIR/fortihost-agent -config $CONFIG_DIR/config.yaml
 Restart=always
 RestartSec=5
-AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -144,34 +254,54 @@ EOF
 systemctl daemon-reload
 systemctl enable fortihost-agent
 systemctl restart fortihost-agent
+info "Service started."
 
-# ─── Firewall ────────────────────────────────────────────────────────────────
-info "Configuring UFW firewall..."
+# ─── UFW ─────────────────────────────────────────────────────────────────────
+step "Configuring UFW firewall"
 ufw --force enable
 ufw allow ssh
 ufw allow http
 ufw allow https
 ufw allow 2022/tcp comment "FortiHost SFTP"
-# Port 8080 (API) should only be open to your panel server.
-# Uncomment and replace with your panel IP:
+# Port 8080 is now on localhost only — no need to expose it if nginx proxies it.
+# If you are NOT using the nginx proxy, restrict it to your panel IP:
 # ufw allow from YOUR_PANEL_IP to any port 8080 proto tcp
+info "Firewall configured."
 
 # ─── Certbot auto-renew ──────────────────────────────────────────────────────
-info "Setting up certbot auto-renew..."
+step "Certbot auto-renew"
 systemctl enable certbot.timer 2>/dev/null || true
+info "Certbot timer enabled."
 
-# ─── Done ─────────────────────────────────────────────────────────────────────
-info ""
-info "Installation complete."
-info ""
-info "Next steps:"
-info "  1. Edit /etc/fortihost-agent/config.yaml — set certbot_email and verify paths."
-info "  2. If the API port (8080) must be reachable from your panel, open it:"
-info "     ufw allow from <panel-ip> to any port 8080 proto tcp"
-info "  3. Restart the agent after any config change:"
-info "     systemctl restart fortihost-agent"
-info "  4. Check logs:"
-info "     journalctl -u fortihost-agent -f"
-info ""
-info "API health check:"
-info "  curl http://localhost:8080/api/v1/health"
+# ─── Summary ─────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${GREEN}  Installation complete!${NC}"
+echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+echo "  API token (add to FortiHost panel):"
+echo -e "  ${YELLOW}${TOKEN}${NC}"
+echo ""
+if [[ -n "$NODE_DOMAIN" ]]; then
+    echo "  API endpoint:"
+    echo -e "  ${CYAN}https://${NODE_DOMAIN}${NC}"
+    echo ""
+    echo "  In the FortiHost panel, set:"
+    echo "    Hostname: ${NODE_DOMAIN}"
+    echo "    API port: 443"
+    echo "    Token:    (above)"
+else
+    echo "  API endpoint (localhost only):"
+    echo -e "  ${CYAN}http://127.0.0.1:8080${NC}"
+    echo ""
+    warn "No domain set — API is only accessible from localhost."
+    warn "To expose it securely, re-run the installer with a domain or set up nginx manually."
+fi
+echo ""
+echo "  SFTP server: port 2022"
+echo ""
+echo "  Useful commands:"
+echo "    journalctl -u fortihost-agent -f      # logs"
+echo "    systemctl restart fortihost-agent     # restart"
+echo "    curl http://localhost:8080/api/v1/health  # health check"
+echo ""
